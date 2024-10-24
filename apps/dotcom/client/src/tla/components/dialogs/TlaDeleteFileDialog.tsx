@@ -1,5 +1,6 @@
-import { TldrawAppFileId } from '@tldraw/dotcom-shared'
+import { TldrawAppFileId, TldrawAppFileRecordType } from '@tldraw/dotcom-shared'
 import { useCallback } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import {
 	TldrawUiButton,
 	TldrawUiButtonLabel,
@@ -10,6 +11,7 @@ import {
 	TldrawUiDialogTitle,
 } from 'tldraw'
 import { useApp } from '../../hooks/useAppState'
+import { useIsFileOwner } from '../../hooks/useIsFileOwner'
 import { useRaw } from '../../hooks/useRaw'
 
 export function TlaDeleteFileDialog({
@@ -21,27 +23,34 @@ export function TlaDeleteFileDialog({
 }) {
 	const app = useApp()
 	const raw = useRaw()
+	const location = useLocation()
+	const navigate = useNavigate()
+
+	const isOwner = useIsFileOwner(fileId)
 
 	const handleDelete = useCallback(() => {
-		app.deleteFile(fileId)
+		app.deleteOrForgetFile(fileId)
+		if (location.pathname.endsWith(TldrawAppFileRecordType.parseId(fileId))) {
+			navigate('/q')
+		}
 		onClose()
-	}, [app, fileId, onClose])
+	}, [app, fileId, location.pathname, navigate, onClose])
 
 	return (
 		<>
 			<TldrawUiDialogHeader>
-				<TldrawUiDialogTitle>{raw('Delete file')}</TldrawUiDialogTitle>
+				<TldrawUiDialogTitle>{raw(isOwner ? 'Delete file' : 'Forget file')}</TldrawUiDialogTitle>
 				<TldrawUiDialogCloseButton />
 			</TldrawUiDialogHeader>
 			<TldrawUiDialogBody style={{ maxWidth: 350 }}>
-				<>{raw('Are you sure you want to delete this file?')}</>
+				<>{raw(`Are you sure you want to ${isOwner ? 'delete' : 'forget'} this file?`)}</>
 			</TldrawUiDialogBody>
 			<TldrawUiDialogFooter className="tlui-dialog__footer__actions">
 				<TldrawUiButton type="normal" onClick={onClose}>
 					<TldrawUiButtonLabel>{raw('Cancel')}</TldrawUiButtonLabel>
 				</TldrawUiButton>
 				<TldrawUiButton type="danger" onClick={handleDelete}>
-					<TldrawUiButtonLabel>{raw('Delete')}</TldrawUiButtonLabel>
+					<TldrawUiButtonLabel>{raw(isOwner ? 'Delete' : 'Forget')}</TldrawUiButtonLabel>
 				</TldrawUiButton>
 			</TldrawUiDialogFooter>
 		</>
