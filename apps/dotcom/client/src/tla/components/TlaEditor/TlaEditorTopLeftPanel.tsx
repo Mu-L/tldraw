@@ -14,6 +14,7 @@ import {
 	TldrawUiDropdownMenuRoot,
 	TldrawUiDropdownMenuTrigger,
 	TldrawUiInput,
+	TldrawUiMenuActionItem,
 	TldrawUiMenuContextProvider,
 	TldrawUiMenuGroup,
 	ViewSubmenu,
@@ -21,22 +22,22 @@ import {
 	usePassThroughWheelEvents,
 	useValue,
 } from 'tldraw'
+import { SAVE_FILE_COPY_ACTION } from '../../../utils/useFileSystem'
 import { useApp } from '../../hooks/useAppState'
 import { useCurrentFileId } from '../../hooks/useCurrentFileId'
 import { useIsFileOwner } from '../../hooks/useIsFileOwner'
 import { TLAppUiEventSource, useTldrawAppUiEvents } from '../../utils/app-ui-events'
-import { defineMessages, useMsg } from '../../utils/i18n'
+import { defineMessages, useIntl, useMsg } from '../../utils/i18n'
 import { TlaAppMenuGroupLazyFlipped } from '../TlaAppMenuGroup/TlaAppMenuGroup'
 import { TlaFileMenu } from '../TlaFileMenu/TlaFileMenu'
 import { TlaIcon, TlaIconWrapper } from '../TlaIcon/TlaIcon'
-import { TlaSidebarToggle } from '../TlaSidebar/components/TlaSidebarToggle'
-import { TlaSidebarToggleMobile } from '../TlaSidebar/components/TlaSidebarToggleMobile'
 import styles from './top.module.css'
 
 const messages = defineMessages({
 	signIn: { defaultMessage: 'Sign in' },
 	pageMenu: { defaultMessage: 'Page menu' },
 	brand: { defaultMessage: 'tldraw' },
+	untitledProject: { defaultMessage: 'Untitled file' },
 })
 
 // There are some styles in tla.css that adjust the regular tlui top panels
@@ -92,7 +93,6 @@ export function TlaEditorTopLeftPanelAnonymous() {
 					</div>
 				</>
 			)}
-
 			{hasPages && (
 				<>
 					<span className={styles.topPanelSeparator}>{separator}</span>
@@ -107,10 +107,13 @@ export function TlaEditorTopLeftPanelAnonymous() {
 						</button>
 					</TldrawUiDropdownMenuTrigger>
 					<TldrawUiDropdownMenuContent side="bottom" align="start" alignOffset={0} sideOffset={0}>
-						<EditSubmenu />
-						<ViewSubmenu />
-						<ExportFileContentSubMenu />
-						<ExtrasGroup />
+						<TldrawUiMenuGroup id="basic">
+							<EditSubmenu />
+							<ViewSubmenu />
+							<ExportFileContentSubMenu />
+							<ExtrasGroup />
+							<TldrawUiMenuActionItem actionId={SAVE_FILE_COPY_ACTION} />
+						</TldrawUiMenuGroup>
 						<TlaAppMenuGroupLazyFlipped />
 						<TldrawUiMenuGroup id="signin">
 							<SignInMenuItem />
@@ -124,6 +127,7 @@ export function TlaEditorTopLeftPanelAnonymous() {
 
 export function TlaEditorTopLeftPanelSignedIn() {
 	const editor = useEditor()
+	const intl = useIntl()
 	const [isRenaming, setIsRenaming] = useState(false)
 	const pageMenuLbl = useMsg(messages.pageMenu)
 
@@ -139,18 +143,26 @@ export function TlaEditorTopLeftPanelSignedIn() {
 		// We should figure out a way to have a single source of truth for the file name.
 		// And to allow guests to 'subscribe' to file metadata updates somehow.
 		() => {
-			// we need that backup file name for empty file names
-			return app.getFileName(fileId).trim() || editor.getDocumentSettings().name
+			// we need that backup file name for empty file names (the initial value for the name is empty)
+			return (
+				app.getFileName(fileId, false)?.trim() ||
+				editor.getDocumentSettings().name ||
+				// rather than displaying the date for the project here, display Untitled project
+				intl.formatMessage(messages.untitledProject)
+			)
 		},
-		[app, editor, fileId]
+		[app, editor, fileId, intl]
 	)
 	const handleFileNameChange = useCallback(
 		(name: string) => {
 			if (isOwner) {
 				setIsRenaming(false)
-				// don't allow guests to update the file name
-				app.updateFile({ id: fileId, name })
-				editor.updateDocumentSettings({ name })
+				// only actually update the name if name is a value, otherwise keep the previous name
+				if (name) {
+					// don't allow guests to update the file name
+					app.updateFile({ id: fileId, name })
+					editor.updateDocumentSettings({ name })
+				}
 			}
 		},
 		[app, editor, fileId, isOwner]
@@ -162,8 +174,8 @@ export function TlaEditorTopLeftPanelSignedIn() {
 	const separator = '/'
 	return (
 		<>
-			<TlaSidebarToggle />
-			<TlaSidebarToggleMobile />
+			{/* spacer for the sidebar toggle button */}
+			<div style={{ width: 40 }} />
 			<TlaFileNameEditor
 				source="file-header"
 				isRenaming={isRenaming}
@@ -273,21 +285,22 @@ function TlaFileNameEditorInput({
 	const rTemporaryName = useRef<string>(fileName)
 	const [temporaryFileName, setTemporaryFileName] = useState(fileName)
 
-	const handleBlur = useCallback(() => {
-		// dispatch the new filename via onComplete
-		const newFileName = rTemporaryName.current.replace(/ /g, '\u00a0')
-		setTemporaryFileName(newFileName)
-		rTemporaryName.current = newFileName
-		onComplete(newFileName)
-		onBlur()
-	}, [onBlur, onComplete])
-
 	const handleCancel = useCallback(() => {
 		// restore original filename from file
 		setTemporaryFileName(fileName)
 		rTemporaryName.current = fileName
 		onBlur()
 	}, [onBlur, fileName])
+
+	const handleBlur = useCallback(() => {
+		// dispatch the new filename via onComplete
+		const newFileName = rTemporaryName.current.replace(/\s+/g, ' ').trim()
+		if (newFileName === fileName) return handleCancel()
+		setTemporaryFileName(newFileName)
+		rTemporaryName.current = newFileName
+		onComplete(newFileName)
+		onBlur()
+	}, [onBlur, onComplete, fileName, handleCancel])
 
 	const handleValueChange = useCallback((value: string) => {
 		setTemporaryFileName(value)
@@ -298,7 +311,7 @@ function TlaFileNameEditorInput({
 		<>
 			<TldrawUiInput
 				className={styles.nameInput}
-				value={temporaryFileName.replace(/ /g, '\u00a0')}
+				value={temporaryFileName}
 				onValueChange={handleValueChange}
 				onCancel={handleCancel}
 				onBlur={handleBlur}
