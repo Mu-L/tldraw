@@ -3,19 +3,11 @@ import {
 	LanguageMenu,
 	TldrawUiMenuGroup,
 	TldrawUiMenuSubmenu,
-	ToggleDebugModeItem,
-	ToggleDynamicSizeModeItem,
-	ToggleEdgeScrollingItem,
-	ToggleFocusModeItem,
-	ToggleGridItem,
-	TogglePasteAtCursorItem,
-	ToggleReduceMotionItem,
-	ToggleSnapModeItem,
-	ToggleToolLockItem,
-	ToggleWrapModeItem,
+	useMaybeEditor,
 } from 'tldraw'
 import { Links } from '../../../components/Links'
 import { defineMessages, useMsg } from '../../utils/i18n'
+import { TlaDebugMenuGroup } from '../TlaDebugMenuGroup'
 
 const messages = defineMessages({
 	help: { defaultMessage: 'Help' },
@@ -27,6 +19,7 @@ export function TlaAppMenuGroup() {
 			<HelpSubMenu />
 			<ColorThemeSubmenu />
 			<LanguageMenu />
+			<TlaDebugMenuGroup />
 		</TldrawUiMenuGroup>
 	)
 }
@@ -42,29 +35,9 @@ export function TlaAppMenuGroupLazyFlipped() {
 }
 
 function ColorThemeSubmenu() {
+	const editor = useMaybeEditor()
+	if (!editor) return null
 	return <ColorSchemeMenu />
-}
-
-function _PreferencesSubmenu() {
-	return (
-		<TldrawUiMenuSubmenu id="preferences" label="menu.preferences">
-			<TldrawUiMenuGroup id="preferences-actions">
-				<ToggleSnapModeItem />
-				<ToggleToolLockItem />
-				<ToggleGridItem />
-				<ToggleWrapModeItem />
-				<ToggleFocusModeItem />
-				<ToggleEdgeScrollingItem />
-				<ToggleReduceMotionItem />
-				<ToggleDynamicSizeModeItem />
-				<TogglePasteAtCursorItem />
-				<ToggleDebugModeItem />
-			</TldrawUiMenuGroup>
-			<TldrawUiMenuGroup id="color-scheme">
-				<ColorSchemeMenu />
-			</TldrawUiMenuGroup>
-		</TldrawUiMenuSubmenu>
-	)
 }
 
 function HelpSubMenu() {
