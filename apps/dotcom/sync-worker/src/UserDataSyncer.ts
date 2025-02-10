@@ -7,10 +7,17 @@ import {
 	ZStoreData,
 	ZTable,
 } from '@tldraw/dotcom-shared'
-import { ExecutionQueue, assert, promiseWithResolve, sleep, uniqueId } from '@tldraw/utils'
+import {
+	ExecutionQueue,
+	assert,
+	assertExists,
+	promiseWithResolve,
+	sleep,
+	uniqueId,
+} from '@tldraw/utils'
 import { createSentry } from '@tldraw/worker-shared'
 import { Kysely } from 'kysely'
-import type { EventHint } from 'toucan-js/node_modules/@sentry/types'
+import { Logger } from './Logger'
 import { TLPostgresReplicator } from './TLPostgresReplicator'
 import {
 	fileKeys,
@@ -102,46 +109,62 @@ export class UserDataSyncer {
 	replicator: TLPostgresReplicator
 
 	store = new OptimisticAppStore()
-	mutations: { mutationNumber: number; mutationId: string }[] = []
+	mutations: { mutationNumber: number; mutationId: string; timestamp: number }[] = []
 
 	sentry
-	// eslint-disable-next-line local/prefer-class-methods
-	private captureException = (exception: unknown, eventHint?: EventHint) => {
+	private captureException(exception: unknown, extras?: Record<string, unknown>) {
 		// eslint-disable-next-line @typescript-eslint/no-deprecated
-		this.sentry?.captureException(exception, eventHint) as any
+		this.sentry?.withScope((scope) => {
+			if (extras) scope.setExtras(extras)
+			// eslint-disable-next-line @typescript-eslint/no-deprecated
+			this.sentry?.captureException(exception) as any
+		})
 		if (!this.sentry) {
 			console.error(`[UserDataSyncer]: `, exception)
 		}
 	}
 
+	interval: NodeJS.Timeout | null = null
+
 	constructor(
-		ctx: DurableObjectState,
+		private ctx: DurableObjectState,
 		env: Environment,
 		private db: Kysely<DB>,
 		private userId: string,
 		private broadcast: (message: ZServerSentMessage) => void,
-		private logEvent: (event: TLUserDurableObjectEvent) => void
+		private logEvent: (event: TLUserDurableObjectEvent) => void,
+		private log: Logger
 	) {
 		this.sentry = createSentry(ctx, env)
 		this.replicator = getReplicator(env)
 		this.reboot(false)
 	}
 
-	private debug(...args: any[]) {
-		// uncomment for dev time debugging
-		// console.log('[UserDataSyncer]:', ...args)
-		if (this.sentry) {
-			// eslint-disable-next-line @typescript-eslint/no-deprecated
-			this.sentry.addBreadcrumb({
-				message: `[UserDataSyncer]: ${args.join(' ')}`,
-			})
+	maybeStartInterval() {
+		if (!this.interval) {
+			this.interval = setInterval(() => this.__rebootIfMutationsNotCommitted(), 1000)
+		}
+	}
+
+	stopInterval() {
+		if (this.interval) {
+			clearInterval(this.interval)
+			this.interval = null
 		}
 	}
 
 	private queue = new ExecutionQueue()
 
+	numConsecutiveReboots = 0
+
 	async reboot(delay = true) {
-		this.debug('rebooting')
+		this.numConsecutiveReboots++
+		if (this.numConsecutiveReboots > 5) {
+			this.logEvent({ type: 'user_do_abort', id: this.userId })
+			this.ctx.abort()
+			return
+		}
+		this.log.debug('rebooting')
 		this.logEvent({ type: 'reboot', id: this.userId })
 		await this.queue.push(async () => {
 			if (delay) {
@@ -149,6 +172,7 @@ export class UserDataSyncer {
 			}
 			try {
 				await this.boot()
+				this.numConsecutiveReboots = 0
 			} catch (e) {
 				this.logEvent({ type: 'reboot_error', id: this.userId })
 				this.captureException(e)
@@ -158,7 +182,7 @@ export class UserDataSyncer {
 	}
 
 	private commitMutations(upToAndIncludingNumber: number) {
-		this.debug('commit mutations', this.userId, upToAndIncludingNumber, this.mutations)
+		this.log.debug('commit mutations', this.userId, upToAndIncludingNumber, this.mutations)
 		const mutationIds = this.mutations
 			.filter((m) => m.mutationNumber <= upToAndIncludingNumber)
 			.map((m) => m.mutationId)
@@ -169,39 +193,47 @@ export class UserDataSyncer {
 
 	private updateStateAfterBootStep() {
 		assert(this.state.type === 'connecting', 'state should be connecting')
-		if (this.state.didGetBootId && this.state.data) {
-			// we got everything, so we can set the state to connected and apply any buffered events
-			const promise = this.state.promise
-			const bufferedEvents = this.state.bufferedEvents
-			const data = this.state.data
-			const mutationNumber = this.state.mutationNumber
-			this.state = {
-				type: 'connected',
-				bootId: this.state.bootId,
-				sequenceId: this.state.sequenceId,
-				lastSequenceNumber: this.state.lastSequenceNumber,
-			}
-			this.store.initialize(data)
+		if (this.state.data) {
+			if (this.state.didGetBootId) {
+				// we got everything, so we can set the state to connected and apply any buffered events
+				const promise = this.state.promise
+				const bufferedEvents = this.state.bufferedEvents
+				const data = this.state.data
+				const mutationNumber = this.state.mutationNumber
+				this.state = {
+					type: 'connected',
+					bootId: this.state.bootId,
+					sequenceId: this.state.sequenceId,
+					lastSequenceNumber: this.state.lastSequenceNumber,
+				}
+				this.store.initialize(data)
 
-			if (bufferedEvents.length > 0) {
-				bufferedEvents.forEach((event) => this.handleReplicationEvent(event))
+				if (bufferedEvents.length > 0) {
+					bufferedEvents.forEach((event) => this.handleReplicationEvent(event))
+					this.broadcast({
+						type: 'initial_data',
+						initialData: assertExists(this.store.getCommittedData()),
+					})
+				}
+				promise.resolve(null)
+
+				this.commitMutations(mutationNumber)
+			} else {
+				this.broadcast({
+					type: 'initial_data',
+					initialData: this.state.data,
+				})
 			}
-			promise.resolve(null)
-			this.broadcast({
-				type: 'initial_data',
-				initialData: data,
-			})
-			this.commitMutations(mutationNumber)
 		}
 		return this.state
 	}
 
 	private async boot() {
-		this.debug('booting')
+		this.log.debug('booting')
 		// todo: clean up old resources if necessary?
 		const start = Date.now()
 		const { sequenceId, sequenceNumber } = await this.replicator.registerUser(this.userId)
-		this.debug('registered user, sequenceId:', sequenceId)
+		this.log.debug('registered user, sequenceId:', sequenceId)
 		this.state = {
 			type: 'connecting',
 			// preserve the promise so any awaiters do eventually get resolved
@@ -276,14 +308,14 @@ export class UserDataSyncer {
 
 		this.state.data = initialData
 		// do an unnecessary assign here to tell typescript that the state might have changed
-		this.debug('got initial data')
+		this.log.debug('got initial data')
 		this.state = this.updateStateAfterBootStep()
 		// this will prevent more events from being added to the buffer
 
 		await promise
 		const end = Date.now()
 		this.logEvent({ type: 'reboot_duration', id: this.userId, duration: end - start })
-		this.debug('boot time', end - start, 'ms')
+		this.log.debug('boot time', end - start, 'ms')
 		assert(this.state.type === 'connected', 'state should be connected after boot')
 	}
 
@@ -320,13 +352,17 @@ export class UserDataSyncer {
 			('sequenceId' in this.state && this.state.sequenceId !== event.sequenceId)
 		) {
 			// the replicator has restarted, so we need to reboot
-			this.debug('force reboot', this.state, event)
+			this.log.debug('force reboot', this.state, event)
 			this.reboot()
 			return
 		}
 		assert(this.state.type !== 'init', 'state should not be init: ' + event.type)
 		if (event.sequenceNumber !== this.state.lastSequenceNumber + 1) {
-			this.debug('sequence number mismatch', event.sequenceNumber, this.state.lastSequenceNumber)
+			this.log.debug(
+				'sequence number mismatch',
+				event.sequenceNumber,
+				this.state.lastSequenceNumber
+			)
 			this.reboot()
 			return
 		}
@@ -344,22 +380,42 @@ export class UserDataSyncer {
 		}
 
 		assert(this.state.type === 'connecting')
-		this.debug('got event', event, this.state.didGetBootId, this.state.bootId)
+		this.log.debug('got event', event, this.state.didGetBootId, this.state.bootId)
 		if (this.state.didGetBootId) {
 			// we've already got the boot id, so just shove things into
 			// a buffer until the state is set to 'connecting'
 			this.state.bufferedEvents.push(event)
 		} else if (event.type === 'boot_complete' && event.bootId === this.state.bootId) {
 			this.state.didGetBootId = true
-			this.debug('got boot id')
+			this.log.debug('got boot id')
 			this.updateStateAfterBootStep()
 		}
 		// ignore other events until we get the boot id
 	}
 
+	getInitialData() {
+		if (this.state.type === 'connecting') {
+			return this.state.data
+		} else if (this.state.type === 'connected') {
+			return this.store.getCommittedData()
+		}
+		return null
+	}
+
 	async waitUntilConnected() {
 		while (this.state.type !== 'connected') {
 			await this.state.promise
+		}
+	}
+
+	private __rebootIfMutationsNotCommitted() {
+		// if any mutations have been not been committed for 5 seconds, let's reboot the cache
+		for (const mutation of this.mutations) {
+			if (Date.now() - mutation.timestamp > 5000) {
+				this.log.debug("Mutations haven't been committed for 5 seconds, rebooting")
+				this.reboot()
+				break
+			}
 		}
 	}
 }
